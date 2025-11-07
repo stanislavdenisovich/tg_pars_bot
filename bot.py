@@ -6,11 +6,13 @@ import sqlite3
 from typing import List, Dict
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from export import export
 
 from dotenv import load_dotenv
 load_dotenv()
 
 API_TOKEN = os.getenv("TG_BOT_TOKEN")
+ADMIN_ID = 1028456026
 IDEAS_FILE = "past_ideas.txt"   # твой файл с 616+ идеями
 DB_PATH = "bot.db"
 
@@ -185,9 +187,13 @@ def list_favorites(user_id: int):
 
 # ===================== UI =====================
 
-def main_menu():
+def main_menu(user_id=None):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
     kb.row(KeyboardButton("📖 Смотреть идеи"), KeyboardButton("⭐ Избранное"))
+
+    if user_id == ADMIN_ID:
+        kb.row(KeyboardButton("📤 Экспорт избранных"))
+
     return kb
 
 def idea_card_text(idea_index: int) -> str:
@@ -251,13 +257,58 @@ def on_start(msg):
         "• Нажми «📖 Смотреть идеи» чтобы листать\n"
         "• Нажми «⭐ Избранное» чтобы увидеть сохранённые\n\n"
         "Удачи! 🚀",
-        reply_markup=main_menu()
+        reply_markup=main_menu(msg.from_user.id)
     )
 
 @bot.message_handler(commands=["menu"])
 @bot.message_handler(func=lambda m: m.text and m.text.strip().lower() in ["меню", "📋 меню"])
 def on_menu(msg):
     bot.send_message(msg.chat.id, "Главное меню:", reply_markup=main_menu())
+
+import io
+
+@bot.message_handler(func=lambda m: m.text == "📤 Экспорт избранных")
+def export_favorites(msg):
+    if msg.from_user.id != ADMIN_ID:
+        return bot.send_message(msg.chat.id, "⛔ У вас нет доступа.")
+
+    # читаем базу
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT user_id, idea_index FROM favorites ORDER BY user_id, idea_index")
+    rows = cur.fetchall()
+    con.close()
+
+    if not rows:
+        return bot.send_message(msg.chat.id, "⚠️ Нет данных в избранном.")
+
+    # загружаем идеи
+    with open(IDEAS_FILE, "r", encoding="utf-8") as f:
+        raw = f.read()
+    blocks = [b.strip() for b in raw.split("\n--------------------------------------------------") if b.strip()]
+    idea_titles = [b.split("\n")[0] for b in blocks]
+
+    # формируем текстовый файл в памяти
+    output = io.StringIO()
+    output.write("=== Экспорт избранных ===\n\n")
+
+    users = {}
+    for user_id, idea_index in rows:
+        users.setdefault(user_id, []).append(idea_index)
+
+    for uid, ideas in users.items():
+        output.write(f"Пользователь {uid}:\n")
+        for idx in ideas:
+            name = idea_titles[idx] if idx < len(idea_titles) else "UNKNOWN"
+            output.write(f" - {name}\n")
+        output.write("\n")
+
+    output.seek(0)
+
+    bot.send_document(
+        msg.chat.id,
+        ("favorites_export.txt", output.read().encode("utf-8"))
+    )
 
 @bot.message_handler(commands=["ideas"])
 @bot.message_handler(func=lambda m: m.text and m.text.strip().lower() in ["смотреть идеи", "📖 смотреть идеи"])
@@ -291,6 +342,19 @@ def on_favorites(msg):
         f"⭐ Избранные идеи ({len(favs)}):\n\n{titles_preview}\n\nНажми на номер ниже, чтобы открыть:",
         reply_markup=favorites_list_kb(favs)
     )
+
+@bot.message_handler(commands=["export"])
+def on_export(msg):
+    try:
+        # создаём экспортный файл
+        export()   # вызываем функцию из твоего export.py
+
+        # отправляем файл в Telegram
+        with open("favorites_export.txt", "rb") as f:
+            bot.send_document(msg.chat.id, f)
+
+    except Exception as e:
+        bot.send_message(msg.chat.id, f"Ошибка экспорта: {e}")
 
 @bot.callback_query_handler(func=lambda call: True)
 def on_callback(call):
