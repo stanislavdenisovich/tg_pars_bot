@@ -317,69 +317,32 @@ def _get_history_bounds(path=HISTORY_PATH, p_low=P_LOW, p_high=P_HIGH):
     except Exception:
         return None
 
-def compute_score(
-    R, I, C, E, K,
-    # веса (экспоненты)
-    alpha=0.65,  # (!) влияет сейчас только если переключишь альтернативный R_norm ниже
-    beta=1.2,
-    gamma=0.7,
-    delta=1.8,
-    etha=1.5,
-    # режим нормировки R
-    r_mode="log"  # "log" | "linear" | "logistic"
-):
-    # ---------- Нормировка Reach ----------
-    R = max(0, float(R))
-    if r_mode == "linear":
-        # 0..100000 -> 0..1
-        R_norm = min(1.0, R/100000.0)
-    elif r_mode == "logistic":
-        # логистическая S-кривая, центр можно подстроить
-        alpha_R = 0.00009  # крутизна
-        tau_R   = 25000    # центр
-        R_norm = 1.0/(1.0 + math.exp(-alpha_R*(R - tau_R)))
-    else:  # "log" по умолчанию
-        # мягкая лог-нормализация: 0 -> 0, 100000 -> 1
-        R_norm = math.log(1 + R) / math.log(100000)
+def compute_score(R, I, C, E, K):
+    import math
 
-    # ---------- Взвешивания ----------
-    I_w = (max(1, float(I))) ** beta
-    C_w = (max(0.0, min(1.0, float(C)))) ** gamma
-    E_w = (max(1, float(E))) ** delta
-    K_w = (max(1, float(K))) ** etha
+    # --- Нормализация reach ---
+    R_norm = math.log1p(max(0, R)) / math.log(100000)
 
-    # ---------- Сырая метрика ----------
+    # --- Взвешивания ---
+    I_w = I ** 1.25
+    C_w = C ** 0.8
+    E_w = E ** 1.5
+    K_w = K ** 1.4
+
     raw = (R_norm * I_w * C_w) / (E_w * K_w)
 
-    # сохраним в историю для будущей автокалибровки
-    if USE_HISTORY:
-        _append_raw_history(raw)
+    # --- Логистическая шкала (идеальный диапазон 1–100%) ---
+    # raw обычно в пределах 0.005 – 0.25
+    # Значит, центрируем на 0.08
+    k = 16   # крутизна S-кривой
+    x0 = 0.08  # центр (средние идеи ≈ 50%)
 
-    # ---------- Базовые теоретические границы raw ----------
-    # Берём разумные «крайние» случаи, чтобы не было нулей:
-    #   R_norm_min≈0 (R=0), I_min=1, C_min=0.1 (не 0, чтобы не обнулять),
-    #   E_max=10, K_max=10
-    raw_min_theory = (0.0 * (1 ** beta) * (0.1 ** gamma)) / ((10 ** delta) * (10 ** etha))
+    score = 1 / (1 + math.exp(-k * (raw - x0)))
 
-    #   R_norm_max=1 (R≈100000), I_max=5, C_max=1, E_min=1, K_min=1
-    raw_max_theory = (1.0 * (5 ** beta) * (1.0 ** gamma)) / ((1.0 ** delta) * (1.0 ** etha))
+    # --- Ограничение 1–100% ---
+    score = max(0.01, min(1.0, score))
 
-    lo, hi = raw_min_theory, raw_max_theory
-
-    # ---------- Опциональная автокалибровка по истории ----------
-    if USE_HISTORY:
-        bounds = _get_history_bounds()
-        if bounds:
-            lo, hi = bounds
-
-    # защита от вырожденности
-    if hi <= lo:
-        hi = lo + 1e-9
-
-    # ---------- Жёсткая min-max нормировка к 1–100% ----------
-    t = (raw - lo) / (hi - lo)  # 0..1 (примерно)
-    t = max(0.01, min(1.0, t))  # клип
-    return round(t * 100, 2)
+    return round(score * 100, 1)
 
 # =============================
 # SAVE
