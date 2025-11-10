@@ -266,9 +266,10 @@ Competition = насыщенность рынка.
 # =============================
 def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
 
-    # нормировка reach
-    R_norm = math.log(1 + R) / math.log(100000)
+    # ---- 1. Нормализация reach ----
+    R_norm = math.log(1 + max(0, R)) / math.log(100000)
 
+    # ---- 2. Взвешивание параметров ----
     I_w = I ** beta
     C_w = C ** gamma
     E_w = E ** delta
@@ -276,17 +277,26 @@ def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, eth
 
     raw = (R_norm * I_w * C_w) / (E_w * K_w)
 
-    # реальные границы (руками подобраны)
-    raw_min = 0.02
-    raw_max = 0.40
+    # ---- 3. Максимально возможное значение ----
+    R_max = 1
+    I_max = 5 ** beta
+    C_max = 1 ** gamma
+    E_min = 1 ** delta
+    K_min = 1 ** etha
 
-    # нормировка
-    raw_norm = (raw - raw_min) / (raw_max - raw_min)
-    raw_norm = max(0, min(1, raw_norm))
+    raw_max = (R_max * I_max * C_max) / (E_min * K_min)
 
-    score = raw_norm * 100
+    # ---- 4. Нормировка в диапазон 0..1 ----
+    norm = raw / raw_max
+    norm = max(0, min(1, norm))
 
-    return f"{score:.1f}%"
+    # ---- 5. Лёгкая S-функция: растягиваем низ + сглаживаем пик ----
+    score = norm ** 0.55      # ключевой параметр!
+
+    # ---- 6. Приводим к 1%..100% ----
+    score = 0.01 + score * 0.99
+
+    return f"{score * 100:.1f}%"
 
 # =============================
 # SAVE
