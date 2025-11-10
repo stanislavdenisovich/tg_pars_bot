@@ -63,14 +63,13 @@ RICE (Reach, Impact, Confidence, Effort) + Competition.
   ]
 }}
 """
-
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         temperature=0.2,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = response.choices[0].message["content"]
+    raw = response.choices[0].message.content
 
     # извлечение JSON
     try:
@@ -315,7 +314,7 @@ def all_messages(msg):
     # --- Шаг 3 — все ответы получены ---
     bot.send_message(msg.chat.id, "✅ Супер! Оцениваю идею...")
 
-    params = evaluate_rice(st["idea"], st["questions"], st["answers"])
+    params = ask_chatgpt(st["idea"], st["questions"], st["answers"])
 
     score = compute_score(
         R=params["reach"],
