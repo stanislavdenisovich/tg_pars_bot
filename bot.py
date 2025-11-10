@@ -1,21 +1,19 @@
 import os
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from dotenv import load_dotenv
 from openai import OpenAI
 import math
 import json
 from datetime import datetime
 
-load_dotenv()
-
+# === Переменные окружения из Railway ===
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TG_BOT_TOKEN:
-    raise RuntimeError("TG_BOT_TOKEN отсутствует в .env")
+    raise RuntimeError("TG_BOT_TOKEN не найден. Добавь его в Railway → Variables")
 if not OPENAI_KEY:
-    raise RuntimeError("OPENAI_API_KEY отсутствует в .env")
+    raise RuntimeError("OPENAI_API_KEY не найден. Добавь его в Railway → Variables")
 
 bot = telebot.TeleBot(TG_BOT_TOKEN, parse_mode="HTML")
 client = OpenAI(api_key=OPENAI_KEY)
@@ -30,7 +28,6 @@ QUESTIONS = [
     "4) Насколько массовая проблема? (в процентах или числах)",
     "5) Насколько сильно решение влияет на пользователя?"
 ]
-
 
 # =============================
 # /start
@@ -47,9 +44,8 @@ def start(msg):
         + QUESTIONS[0]
     )
 
-
 # =============================
-# Сбор ответов на вопросы
+# Сбор ответов
 # =============================
 @bot.message_handler(func=lambda m: m.from_user.id in USER_STATE)
 def collect_answers(msg):
@@ -65,14 +61,82 @@ def collect_answers(msg):
         bot.send_message(msg.chat.id, "✅ Отлично. Иду считать оценку...")
         process_idea(msg.chat.id, user)
 
-
 # =============================
-# ChatGPT: Анализ идеи и получение R,I,C,E,K
+# ChatGPT анализ
 # =============================
 def ask_chatgpt(answers):
-    prompt = f"""
-Проанализируй стартап идею по пяти параметрам RICE+:
+    """
+    Возвращает словарь с числовыми полями:
+    {
+      "reach": int [0..100000],
+      "impact": int [1..5],
+      "confidence": float [0..1],
+      "effort": int [1..10],
+      "competition": int [1..10]
+    }
+    """
+    rules = """
+Ты — строгий оценщик стартапов по модели RICE+, возвращай ТОЛЬКО JSON без комментариев и текста.
 
+Оцени по пяти метрикам с ЖЁСТКИМИ диапазонами и правилами:
+
+1) reach (R) — оценка охвата аудитории/кол-ва затронутых пользователей в месяц.
+   • Тип: целое число.
+   • Диапазон: 0..100000 (0 — никого, 100000 — экстремально массово).
+   • Эвристика:
+     - ниша < 1 000
+     - маленький рынок 1 000..10 000
+     - средний 10 001..30 000
+     - большой 30 001..60 000
+     - массовый 60 001..100 000
+   • Опираться на размер ЦА, широту проблемы, частоту использования и реалистичные допущения.
+
+2) impact (I) — сила эффекта решения для одного пользователя.
+   • Тип: целое число.
+   • Диапазон: 1..5 (1 — косметически, 5 — трансформационно).
+   • Шкала:
+     1 = лёгкое удобство/косметика
+     2 = заметное удобство
+     3 = существенная польза/экономия времени/денег
+     4 = критичная польза, сильно меняет поведение
+     5 = жизненно важно/слом рынка/замена привычных процессов
+
+3) confidence (C) — уверенность в оценках и осуществимости.
+   • Тип: число с плавающей точкой.
+   • Диапазон: 0..1 (0 — нет уверенности, 1 — очень высокая).
+   • Округление до двух знаков.
+   • Опираться на ясность боли, наличие сигналов спроса, простоту реализации, аналогии/референсы.
+     Примеры порогов:
+       0.2 — слабые основания/мало данных
+       0.5 — средняя уверенность
+       0.8 — сильная уверенность (есть сигналы рынка/прототип/кейсы)
+
+4) effort (E) — сложность/затраты реализации первого релиза (MVP→v1).
+   • Тип: целое число.
+   • Диапазон: 1..10 (1 — «выходные и готово», 10 — «многолетний проект»).
+   • Эвристика:
+     1–2: лендинг/простая форма/простое CRUD-веб/бот без интеграций
+     3–4: полноценный веб-продукт, 1–2 интеграции, простая админка
+     5–6: мобильные клиенты, платёжки, роли, аналитика, умеренный бэкенд
+     7–8: сложные интеграции, real-time, ML-инфраструктура, безопасность/комплаенс
+     9–10: высокие требования к масштабированию, регуляции, длинный R&D
+
+5) competition (K) — уровень конкуренции и насыщенность рынка.
+   • Тип: целое число.
+   • Диапазон: 1..10 (1 — «blue ocean», 10 — «red ocean» с доминантами).
+   • Эвристика:
+     1–2: почти нет прямых аналогов, высокая новизна
+     3–5: есть аналоги/SMB-игроки, нишевая конкуренция
+     6–8: заметные игроки, много альтернатив, нужен сильный дифференциатор
+     9–10: крупные доминанты, высокие switching costs, сильные сети/моаты
+
+ОБЩИЕ ТРЕБОВАНИЯ:
+• Если данных мало — оцени консервативно, но в заданных диапазонах.
+• Соблюдай типы: reach/impact/effort/competition — целые; confidence — float с 2 знаками.
+• Верни ТОЛЬКО валидный JSON без форматирующего текста.
+"""
+
+    user_data = f"""
 Данные пользователя:
 1) Проблема: {answers[0]}
 2) Решение: {answers[1]}
@@ -80,32 +144,70 @@ def ask_chatgpt(answers):
 4) Масштаб: {answers[3]}
 5) Эффект: {answers[4]}
 
-Верни строго JSON с ключами:
-reach — число
-impact — число от 1 до 5
-confidence — число 0–1
-effort — число от 1 до 10
-competition — число 1–10
+Верни JSON строго такого вида (ключи и типы обязательны):
+{{
+  "reach": <int 0..100000>,
+  "impact": <int 1..5>,
+  "confidence": <float 0..1>,
+  "effort": <int 1..10>,
+  "competition": <int 1..10>
+}}
 """
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}]
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": rules.strip()},
+            {"role": "user", "content": user_data.strip()}
+        ]
     )
 
-    text = response.choices[0].message["content"]
+    text = response.choices[0].message.content if hasattr(response.choices[0].message, "content") \
+           else response.choices[0].message["content"]
 
+    # Жёсткая валидация/нормализация JSON:
     try:
         data = json.loads(text)
-        return data
-    except:
-        raise RuntimeError("ChatGPT вернул невалидный JSON:\n" + text)
+    except Exception:
+        # Попытка вытащить JSON по грубому шаблону, если модель вдруг добавила лишнее
+        import re
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            raise RuntimeError("ChatGPT вернул невалидный JSON:\n" + text)
+        data = json.loads(m.group(0))
 
+    # Приведение типов и зажим в диапазоны:
+    def clamp_int(v, lo, hi):
+        try:
+            v = int(round(float(v)))
+        except Exception:
+            v = lo
+        return max(lo, min(hi, v))
+
+    def clamp_float(v, lo, hi, ndigits=2):
+        try:
+            v = float(v)
+        except Exception:
+            v = lo
+        v = max(lo, min(hi, v))
+        return round(v, ndigits)
+
+    data_norm = {
+        "reach": clamp_int(data.get("reach", 0), 0, 100000),
+        "impact": clamp_int(data.get("impact", 3), 1, 5),
+        "confidence": clamp_float(data.get("confidence", 0.5), 0.0, 1.0, 2),
+        "effort": clamp_int(data.get("effort", 5), 1, 10),
+        "competition": clamp_int(data.get("competition", 5), 1, 10),
+    }
+
+    return data_norm
 
 # =============================
-# Вычисление финального SCORE
+# SCORE
 # =============================
 def compute_score(R, I, C, E, K, alpha=0.9, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
+    import math
     R_norm = math.log(1 + max(R, 0)) ** alpha
     I_w = I ** beta
     E_w = E ** delta
@@ -114,9 +216,8 @@ def compute_score(R, I, C, E, K, alpha=0.9, beta=1.2, gamma=0.7, delta=1.8, etha
 
     return round((R_norm * I_w * C_w) / (E_w * K_w), 4)
 
-
 # =============================
-# Сохранение в results.txt
+# Save to file
 # =============================
 def save_result(user_id, answers, params, score):
     with open("results.txt", "a", encoding="utf-8") as f:
@@ -132,9 +233,8 @@ def save_result(user_id, answers, params, score):
         f.write(f"\nScore: {score}\n")
         f.write("============================\n")
 
-
 # =============================
-# Главная функция обработки
+# Process
 # =============================
 def process_idea(chat_id, user):
     answers = ANSWERS[user]
@@ -159,9 +259,8 @@ def process_idea(chat_id, user):
     del USER_STATE[user]
     del ANSWERS[user]
 
-
 # =============================
-# Запуск
+# RUN
 # =============================
 print("Bot started.")
 bot.infinity_polling()
