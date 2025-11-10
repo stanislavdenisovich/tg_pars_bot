@@ -461,14 +461,7 @@ def handle_idea(msg):
     result_text = f"""
 <b>🔍 Анализ твоей идеи</b>
 
-<b>✅ Итоговая оценка: {score}%</b>
-
-<b>📊 Параметры RICE+:</b>
-• Reach: {params['reach']}
-• Impact: {params['impact']}
-• Confidence: {params['confidence']}
-• Effort: {params['effort']}
-• Competition: {params['competition']}
+<b>✅ Итоговая оценка: {score}</b>
 
 <b>💡 Экспертный разбор:</b>
 {advice}
