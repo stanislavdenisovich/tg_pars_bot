@@ -284,7 +284,7 @@ def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, eth
     normalized = raw_score / max_raw
     normalized = max(0.01, min(1.0, normalized))
 
-    return f"round(normalized * 100, 1)%"
+    return f"{round(normalized * 100, 1)}%"
 
 # =============================
 # SAVE
