@@ -283,8 +283,7 @@ def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, eth
     # ограничение 1–100%
     score = max(0.01, min(1.0, score))
 
-    return round(score * 100, 1) + "%"
-
+    return f"{score * 100:.1f}%"
 
 # =============================
 # SAVE
