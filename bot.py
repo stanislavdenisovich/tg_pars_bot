@@ -31,7 +31,43 @@ def start(msg):
         "Я сам извлеку ключевую информацию и оценю её по формуле Score."
     )
 
+def validate_idea(text):
+    prompt = f"""
+Ты — фильтр качества. Твой ответ должен быть ТОЛЬКО JSON.
 
+Задача: определить, является ли текст полноценным описанием идеи стартапа.
+
+Требования к идее:
+- есть понятный продукт или услуга
+- есть проблема или задача, которую решает продукт
+- есть целевая аудитория
+- текст связан, не набор случайных слов
+- нет бессмыслицы, матов, спама, бессвязного чата
+
+Верни JSON строго такого формата:
+{{
+  "valid": true/false,
+  "reason": "короткое объяснение, почему"
+}}
+
+Проверяемый текст:
+\"\"\"{text}\"\"\"  
+"""
+
+    res = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = res.choices[0].message.content
+
+    try:
+        data = json.loads(raw)
+    except:
+        return {"valid": False, "reason": "Ошибка парсинга"}
+
+    return data
 # =============================
 # ChatGPT — RICE+ анализ без структуры
 # =============================
@@ -284,21 +320,6 @@ def _percentile(sorted_vals, p):
         return sorted_vals[int(k)]
     return sorted_vals[f] + (sorted_vals[c]-sorted_vals[f])*(k-f)
 
-def _append_raw_history(value, path=HISTORY_PATH, limit=5000):
-    try:
-        if os.path.exists(path):
-            data = json.load(open(path, "r"))
-            if not isinstance(data, list):
-                data = []
-        else:
-            data = []
-    except Exception:
-        data = []
-    data.append(float(value))
-    # ограничим размер истории
-    if len(data) > limit:
-        data = data[-limit:]
-    json.dump(data, open(path, "w"))
 
 def _get_history_bounds(path=HISTORY_PATH, p_low=P_LOW, p_high=P_HIGH):
     try:
@@ -342,7 +363,7 @@ def compute_score(R, I, C, E, K):
     # --- Ограничение 1–100% ---
     score = max(0.01, min(1.0, score))
 
-    return round(score * 100, 1)
+    return  f"{round(score * 100, 1)}%"
 
 # =============================
 # SAVE
@@ -406,11 +427,27 @@ Competition: {params['competition']}
 @bot.message_handler(func=lambda m: True)
 def handle_idea(msg):
     user = msg.from_user.id
-    idea = msg.text
+    idea = msg.text.strip()
 
+    # ---------- ШАГ 0: Проверка валидности ----------
+    check = validate_idea(idea)
+
+    if not check["valid"]:
+        bot.send_message(
+            msg.chat.id,
+            f"❌ <b>Это не похоже на идею стартапа.</b>\n"
+            f"Причина: {check['reason']}\n\n"
+            "✅ Пожалуйста, опиши идею так, чтобы было понятно:\n"
+            "— что за продукт;\n"
+            "— какую проблему он решает;\n"
+            "— для кого.\n\n"
+            "Попробуй ещё раз 😉"
+        )
+        return
+
+    # ---------- ШАГ 1: RICE+ ----------
     bot.send_message(msg.chat.id, "✅ Анализирую твою идею...")
 
-    # 1) Считаем RICE+
     params = ask_chatgpt(idea)
     score = compute_score(
         R=params["reach"],
@@ -420,17 +457,24 @@ def handle_idea(msg):
         K=params["competition"]
     )
 
-    # 2) Сохраняем в файл
+    # ---------- ШАГ 2: сохраняем ----------
     save_result(user, idea, params, score)
 
-    # 3) Запрашиваем у ChatGPT персональный анализ и советы
+    # ---------- ШАГ 3: персональные советы ----------
     advice = generate_advice(idea, params)
 
-    # 4) Отправляем человеку итог
+    # ---------- ШАГ 4: отправляем результат ----------
     result_text = f"""
 <b>🔍 Анализ твоей идеи</b>
 
-<b>✅ Итоговая оценка: {score}</b>
+<b>✅ Итоговая оценка: {score}%</b>
+
+<b>📊 Параметры RICE+:</b>
+• Reach: {params['reach']}
+• Impact: {params['impact']}
+• Confidence: {params['confidence']}
+• Effort: {params['effort']}
+• Competition: {params['competition']}
 
 <b>💡 Экспертный разбор:</b>
 {advice}
