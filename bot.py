@@ -265,7 +265,9 @@ Competition = насыщенность рынка.
 # SCORE formula
 # =============================
 def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
-    R_norm = math.log(1 + max(0, R)) / math.log(100000)
+
+    # нормировка reach
+    R_norm = math.log(1 + R) / math.log(100000)
 
     I_w = I ** beta
     C_w = C ** gamma
@@ -274,16 +276,17 @@ def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, eth
 
     raw = (R_norm * I_w * C_w) / (E_w * K_w)
 
-    # ✅ Логистическая нормировка
-    k = 8       # крутизна
-    b = 0.15    # смещение центра (подобрано под реальные raw значения)
+    # реальные границы (руками подобраны)
+    raw_min = 0.02
+    raw_max = 0.40
 
-    score = 1 / (1 + math.exp(-k * (raw - b)))
+    # нормировка
+    raw_norm = (raw - raw_min) / (raw_max - raw_min)
+    raw_norm = max(0, min(1, raw_norm))
 
-    # ограничение 1–100%
-    score = max(0.01, min(1.0, score))
+    score = raw_norm * 100
 
-    return f"{score * 100:.1f}%"
+    return f"{score:.1f}%"
 
 # =============================
 # SAVE
