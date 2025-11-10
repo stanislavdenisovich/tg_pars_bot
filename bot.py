@@ -275,8 +275,13 @@ def handle_idea(msg):
     bot.send_message(msg.chat.id, "✅ Анализирую твою идею...")
 
     params = ask_chatgpt(idea)
-    score = compute_score(**params)
-
+    score = compute_score(
+        R=params["reach"],
+        I=params["impact"],
+        C=params["confidence"],
+        E=params["effort"],
+        K=params["competition"]
+)
     save_result(user, idea, params, score)
 
     result_text = f"""
