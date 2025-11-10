@@ -1,5 +1,6 @@
 import os
 import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from openai import OpenAI
 import json
 from datetime import datetime
@@ -19,32 +20,57 @@ if not OPENAI_KEY:
 bot = telebot.TeleBot(TG_BOT_TOKEN, parse_mode="HTML")
 client = OpenAI(api_key=OPENAI_KEY)
 
+# =============================
+# STATE
+# =============================
+STATE = {}   # user_id → {mode, idea}
+
 
 # =============================
 # /start
 # =============================
 @bot.message_handler(commands=["start"])
 def start(msg):
+    STATE[msg.from_user.id] = {"mode": "wait_idea"}
+
     bot.send_message(
         msg.chat.id,
-        "🔥 Отправь свою идею стартапа по структуре ниже:\n\n"
-        "1) Что за продукт?\n"
-        "2) Какая проблема?\n"
-        "3) Кто ЦА?\n"
-        "4) Размер аудитории?\n"
-        "5) Частота проблемы?\n"
-        "6) Почему текущие решения слабые?\n"
-        "7) Что уникального?\n"
-        "8) Сложность реализации?\n"
-        "9) Кто конкуренты?\n\n"
-        "✅ После этого я оценю идею по RICE+ с учётом реалий Казахстана."
+        "🔥 Напиши свою идею стартапа одним сообщением, как хочешь.\n\n"
+        "Я её структурирую, улучшу и покажу в виде готового описания.\n"
+        "После ты сможешь нажать «Принять» или «Редактировать»."
     )
 
 
 # =============================
+# GPT: структурирование идеи
+# =============================
+def expand_idea(raw_text):
+    prompt = f"""
+Ты — эксперт-продуктолог. Пользователь написал идею стартапа (неструктурированно):
+
+\"\"\"{raw_text}\"\"\"
+
+Твоя задача:
+• перепиши её красиво, структурировано и понятно
+• сохрани суть
+• добавь недостающие детали, которые логически следуют из описания
+• сделай таким образом, чтобы её можно было оценить по модели RICE+
+
+Формат вывода:
+ТОЛЬКО текст описания, без списка, без JSON, без комментариев.
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.4,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return response.choices[0].message.content.strip()
+# =============================
 # ChatGPT RICE+ анализ
 # =============================
-def ask_chatgpt(idea, q_list, a_list):
+def ask_chatgpt(idea_text):
     """
     Возвращает словарь с числовыми полями:
     {
@@ -120,10 +146,7 @@ def ask_chatgpt(idea, q_list, a_list):
 
     user_data = f"""
 Идея:
-{idea}
-
-Вопросы и ответы:
-{json.dumps(list(zip(q_list, a_list)), ensure_ascii=False, indent=2)}
+{idea_text}
 
 Верни JSON строго такого вида:
 {{
@@ -182,14 +205,14 @@ def ask_chatgpt(idea, q_list, a_list):
 
 
 # =============================
-# SCORE formula
+# SCORE
 # =============================
-def compute_score(R, I, C, E, K, alpha=0.9, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
-    R_norm = math.log(1 + max(R, 0)) ** alpha
-    I_w = I ** beta
-    E_w = E ** delta
-    K_w = K ** etha
-    C_w = C ** gamma
+def compute_score(R, I, C, E, K):
+    R_norm = math.log(1 + max(R, 0)) ** 0.9
+    I_w = I ** 1.2
+    E_w = E ** 1.8
+    K_w = K ** 1.5
+    C_w = C ** 0.7
     return round((R_norm * I_w * C_w) / (E_w * K_w), 4)
 
 
@@ -200,35 +223,61 @@ def save_result(user_id, idea, params, score):
     with open("results.txt", "a", encoding="utf-8") as f:
         f.write("\n============================\n")
         f.write(f"Дата: {datetime.now()}\n")
-        f.write(f"User ID: {user_id}\n")
-        f.write(f"Идея:\n{idea}\n")
-        f.write("\nПараметры RICE+:\n")
+        f.write(f"User ID: {user_id}\n\n")
+        f.write("Идея:\n")
+        f.write(idea + "\n\n")
+        f.write("Параметры RICE+:\n")
         f.write(json.dumps(params, ensure_ascii=False, indent=2))
         f.write(f"\nScore: {score}\n")
         f.write("============================\n")
 
 
 # =============================
-# MAIN HANDLER
+# МЕССЕДЖИ
 # =============================
 @bot.message_handler(func=lambda m: True)
-def handle_idea(msg):
+def main_handler(msg):
     user = msg.from_user.id
-    idea = msg.text
 
-    bot.send_message(msg.chat.id, "✅ Анализирую твою идею...")
+    # Если только начали — пришла сырая идея
+    if user not in STATE or STATE[user]["mode"] == "wait_idea":
+        raw = msg.text
 
-    params = ask_chatgpt(idea)
-    score = compute_score(**params)
+        bot.send_message(msg.chat.id, "✍️ Обрабатываю, структурирую идею...")
+        expanded = expand_idea(raw)
 
-    save_result(user, idea, params, score)
+        # кнопки
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        kb.add(KeyboardButton("✅ Принять"), KeyboardButton("✏️ Редактировать"))
 
-    result_text = f"""
+        STATE[user] = {"mode": "confirm", "idea": expanded}
+
+        bot.send_message(
+            msg.chat.id,
+            f"📄 <b>Вот улучшенная версия идеи:</b>\n\n{expanded}\n\nВыбери действие:",
+            reply_markup=kb
+        )
+        return
+
+    # Если на этапе подтверждения
+    if STATE[user]["mode"] == "confirm":
+        if msg.text == "✅ Принять":
+            idea = STATE[user]["idea"]
+
+            bot.send_message(msg.chat.id, "✅ Отлично! Оцениваю идею по RICE+...")
+
+            params = ask_chatgpt(idea)
+            score = compute_score(**params)
+            save_result(user, idea, params, score)
+
+            bot.send_message(
+                msg.chat.id,
+                f"""
 <b>🔍 Анализ твоей идеи</b>
 
-<b>✅ Итоговая оценка: {score}</b>
+<b>Итоговая оценка: {score}</b>
 
-<b>📊 Параметры:</b>
+📊 <b>Параметры:</b>
 • Reach: {params['reach']}
 • Impact: {params['impact']}
 • Confidence: {params['confidence']}
@@ -236,17 +285,28 @@ def handle_idea(msg):
 • Competition: {params['competition']}
 
 <b>💡 Вывод:</b>
-{"🔥 Отличная идея! Потенциал высокий." if score > 0.8 else
- "✅ Идея неплохая, но требует доработки." if score > 0.4 else
- "⚠️ Идея слабая — рынок маленький или высокая конкуренция."}
+{"🔥 Очень высокий потенциал — можно запускать!" if score > 0.8 else
+ "✅ Идея перспективная, но требует уточнений." if score > 0.4 else
+ "⚠️ Идея слабая — маленький рынок или высокая конкуренция."}
+""",
+                reply_markup=telebot.types.ReplyKeyboardRemove()
+            )
 
-<b>📌 Рекомендация:</b>
-{"Запускай MVP как можно быстрее." if score > 0.8 else
- "Можно протестировать на небольшой аудитории." if score > 0.4 else
- "Лучше выбрать другую нишу или изменить позиционирование."}
-"""
+            STATE.pop(user, None)
+            return
 
-    bot.send_message(msg.chat.id, result_text)
+        elif msg.text == "✏️ Редактировать":
+            bot.send_message(
+                msg.chat.id,
+                "✏️ Напиши новую версию идеи любым текстом.",
+                reply_markup=telebot.types.ReplyKeyboardRemove()
+            )
+            STATE[user] = {"mode": "wait_idea"}
+            return
+
+        else:
+            bot.send_message(msg.chat.id, "Выбери кнопку: ✅ Принять или ✏️ Редактировать.")
+            return
 
 
 # =============================
