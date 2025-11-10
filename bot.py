@@ -1,6 +1,5 @@
 import os
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from openai import OpenAI
 import json
 from datetime import datetime
@@ -20,10 +19,6 @@ if not OPENAI_KEY:
 bot = telebot.TeleBot(TG_BOT_TOKEN, parse_mode="HTML")
 client = OpenAI(api_key=OPENAI_KEY)
 
-# =============================
-#  STATE
-# =============================
-STATE = {}        # user_id → {"mode": "ask_questions" | "collect", "questions": [...], "answers": []}
 
 # =============================
 # /start
@@ -32,57 +27,22 @@ STATE = {}        # user_id → {"mode": "ask_questions" | "collect", "questions
 def start(msg):
     bot.send_message(
         msg.chat.id,
-        "🔥 Напиши свою идею стартапа в одном сообщении.\n"
-        "Я сам задам уточняющие вопросы, а потом оценю её по модели RICE+."
+        "🔥 Отправь свою идею стартапа по структуре ниже:\n\n"
+        "1) Что за продукт?\n"
+        "2) Какая проблема?\n"
+        "3) Кто ЦА?\n"
+        "4) Размер аудитории?\n"
+        "5) Частота проблемы?\n"
+        "6) Почему текущие решения слабые?\n"
+        "7) Что уникального?\n"
+        "8) Сложность реализации?\n"
+        "9) Кто конкуренты?\n\n"
+        "✅ После этого я оценю идею по RICE+ с учётом реалий Казахстана."
     )
 
-    STATE[msg.from_user.id] = {"mode": "wait_idea"}
-
 
 # =============================
-# Генерация вопросов GPT
-# =============================
-def generate_questions(idea_text: str):
-    prompt = f"""
-Ты — эксперт-аналитик стартапов.
-Пользователь дал идею:
-
-\"\"\"{idea_text}\"\"\"
-
-Сгенерируй 3–5 самых важных уточняющих вопросов,
-которые нужны для корректной оценки идеи по метрикам
-RICE (Reach, Impact, Confidence, Effort) + Competition.
-
-Формат ответа: ТОЛЬКО JSON, пример:
-
-{{
-  "questions": [
-    "Вопрос 1...",
-    "Вопрос 2...",
-    "Вопрос 3..."
-  ]
-}}
-"""
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    raw = response.choices[0].message.content
-
-    # извлечение JSON
-    try:
-        return json.loads(raw)["questions"]
-    except:
-        import re
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if not m:
-            raise RuntimeError("Ошибка: GPT вернул не JSON:\n" + raw)
-        return json.loads(m.group(0))["questions"]
-
-# =============================
-# ChatGPT анализ
+# ChatGPT RICE+ анализ
 # =============================
 def ask_chatgpt(idea, q_list, a_list):
     """
@@ -220,113 +180,77 @@ def ask_chatgpt(idea, q_list, a_list):
         "competition": clamp_int(data.get("competition", 5), 1, 10)
     }
 
+
 # =============================
-# SCORE
+# SCORE formula
 # =============================
 def compute_score(R, I, C, E, K, alpha=0.9, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
-    import math
     R_norm = math.log(1 + max(R, 0)) ** alpha
     I_w = I ** beta
     E_w = E ** delta
     K_w = K ** etha
     C_w = C ** gamma
-
     return round((R_norm * I_w * C_w) / (E_w * K_w), 4)
 
+
 # =============================
-#  Сохранение
+# SAVE
 # =============================
-def save_result(user_id, idea, questions, answers, params, score):
+def save_result(user_id, idea, params, score):
     with open("results.txt", "a", encoding="utf-8") as f:
         f.write("\n============================\n")
         f.write(f"Дата: {datetime.now()}\n")
         f.write(f"User ID: {user_id}\n")
-        f.write(f"Идея: {idea}\n\n")
-        f.write("Вопросы и ответы:\n")
-        for q, a in zip(questions, answers):
-            f.write(f"- {q}\n  {a}\n")
-        f.write("\nОценка параметров:\n")
+        f.write(f"Идея:\n{idea}\n")
+        f.write("\nПараметры RICE+:\n")
         f.write(json.dumps(params, ensure_ascii=False, indent=2))
         f.write(f"\nScore: {score}\n")
         f.write("============================\n")
 
 
 # =============================
-#  Основная логика сообщений
+# MAIN HANDLER
 # =============================
 @bot.message_handler(func=lambda m: True)
-def all_messages(msg):
+def handle_idea(msg):
     user = msg.from_user.id
+    idea = msg.text
 
-    # --- Шаг 1 — ждем идею ---
-    if user not in STATE or STATE[user]["mode"] == "wait_idea":
-        idea = msg.text
-        bot.send_message(msg.chat.id, "✅ Получил идею. Генерирую уточняющие вопросы...")
+    bot.send_message(msg.chat.id, "✅ Анализирую твою идею...")
 
-        questions = generate_questions(idea)
+    params = ask_chatgpt(idea)
+    score = compute_score(**params)
 
-        STATE[user] = {
-            "mode": "collect",
-            "idea": idea,
-            "questions": questions,
-            "answers": [],
-            "index": 0
-        }
+    save_result(user, idea, params, score)
 
-        bot.send_message(msg.chat.id, f"❓ {questions[0]}")
-        return
+    result_text = f"""
+<b>🔍 Анализ твоей идеи</b>
 
-    # --- Шаг 2 — собираем ответы ---
-    st = STATE[user]
+<b>✅ Итоговая оценка: {score}</b>
 
-    st["answers"].append(msg.text)
-    st["index"] += 1
+<b>📊 Параметры:</b>
+• Reach: {params['reach']}
+• Impact: {params['impact']}
+• Confidence: {params['confidence']}
+• Effort: {params['effort']}
+• Competition: {params['competition']}
 
-    if st["index"] < len(st["questions"]):
-        bot.send_message(msg.chat.id, f"❓ {st['questions'][st['index']]}")
-        return
+<b>💡 Вывод:</b>
+{"🔥 Отличная идея! Потенциал высокий." if score > 0.8 else
+ "✅ Идея неплохая, но требует доработки." if score > 0.4 else
+ "⚠️ Идея слабая — рынок маленький или высокая конкуренция."}
 
-    # --- Шаг 3 — все ответы получены ---
-    bot.send_message(msg.chat.id, "✅ Супер! Оцениваю идею...")
+<b>📌 Рекомендация:</b>
+{"Запускай MVP как можно быстрее." if score > 0.8 else
+ "Можно протестировать на небольшой аудитории." if score > 0.4 else
+ "Лучше выбрать другую нишу или изменить позиционирование."}
+"""
 
-    params = ask_chatgpt(st["idea"], st["questions"], st["answers"])
-
-    score = compute_score(
-        R=params["reach"],
-        I=params["impact"],
-        C=params["confidence"],
-        E=params["effort"],
-        K=params["competition"]
-    )
-
-    save_result(user, st["idea"], st["questions"], st["answers"], params, score)
-
-    explanation = f"""
-    <b>🔍 Анализ твоей идеи</b>
-
-    <b>✅ Итоговая оценка: {score}</b>
-
-    <b>📊 Что это значит:</b>
-    • Reach: {params['reach']} — примерный реальный рынок в Казахстане
-    • Impact: {params['impact']} — сила эффекта для пользователя
-    • Confidence: {params['confidence']} — уверенность в реализуемости
-    • Effort: {params['effort']} — сложность MVP
-    • Competition: {params['competition']} — насыщенность рынка
-
-    <b>💡 Вывод:</b>
-    Чем выше итоговая оценка — тем лучше сочетание: рынок + эффект + уверенность + низкие риски.
-
-    <b>📌 Рекомендация:</b>
-    Я бы оценил эту идею как <b>{"перспективную" if score > 0.8 else "среднюю" if score > 0.4 else "низкоприоритетную"}</b>.
-    """
-
-    bot.send_message(msg.chat.id, explanation)
-
-    del STATE[user]
+    bot.send_message(msg.chat.id, result_text)
 
 
 # =============================
-#  RUN
+# RUN
 # =============================
 print("Bot started.")
 bot.infinity_polling()
