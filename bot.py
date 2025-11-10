@@ -264,39 +264,122 @@ Competition = насыщенность рынка.
 # =============================
 # SCORE formula
 # =============================
-def compute_score(R, I, C, E, K, alpha=0.65, beta=1.2, gamma=0.7, delta=1.8, etha=1.5):
+import math
+import json
+import os
+from statistics import median
 
-    # ---- 1. Нормализация reach ----
-    R_norm = math.log(1 + max(0, R)) / math.log(100000)
+# ===== Настройки нормировки =====
+HISTORY_PATH = "score_history_raw.json"  # сюда пишем историю "raw", чтобы калибровать под реальные данные
+USE_HISTORY = True                       # включить автокалибровку по истории
+P_LOW, P_HIGH = 5, 95                    # перцентили, задающие рабочий диапазон (1%..99%)
 
-    # ---- 2. Взвешивание параметров ----
-    I_w = I ** beta
-    C_w = C ** gamma
-    E_w = E ** delta
-    K_w = K ** etha
+def _percentile(sorted_vals, p):
+    """Простой персентиль без внешних либ."""
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals)-1) * (p/100.0)
+    f = math.floor(k); c = math.ceil(k)
+    if f == c:
+        return sorted_vals[int(k)]
+    return sorted_vals[f] + (sorted_vals[c]-sorted_vals[f])*(k-f)
 
+def _append_raw_history(value, path=HISTORY_PATH, limit=5000):
+    try:
+        if os.path.exists(path):
+            data = json.load(open(path, "r"))
+            if not isinstance(data, list):
+                data = []
+        else:
+            data = []
+    except Exception:
+        data = []
+    data.append(float(value))
+    # ограничим размер истории
+    if len(data) > limit:
+        data = data[-limit:]
+    json.dump(data, open(path, "w"))
+
+def _get_history_bounds(path=HISTORY_PATH, p_low=P_LOW, p_high=P_HIGH):
+    try:
+        if not os.path.exists(path):
+            return None
+        data = json.load(open(path, "r"))
+        if not data:
+            return None
+        vals = sorted(float(x) for x in data)
+        lo = _percentile(vals, p_low)
+        hi = _percentile(vals, p_high)
+        # защита от вырожденности
+        if lo is None or hi is None or hi <= lo:
+            return None
+        return (lo, hi)
+    except Exception:
+        return None
+
+def compute_score(
+    R, I, C, E, K,
+    # веса (экспоненты)
+    alpha=0.65,  # (!) влияет сейчас только если переключишь альтернативный R_norm ниже
+    beta=1.2,
+    gamma=0.7,
+    delta=1.8,
+    etha=1.5,
+    # режим нормировки R
+    r_mode="log"  # "log" | "linear" | "logistic"
+):
+    # ---------- Нормировка Reach ----------
+    R = max(0, float(R))
+    if r_mode == "linear":
+        # 0..100000 -> 0..1
+        R_norm = min(1.0, R/100000.0)
+    elif r_mode == "logistic":
+        # логистическая S-кривая, центр можно подстроить
+        alpha_R = 0.00009  # крутизна
+        tau_R   = 25000    # центр
+        R_norm = 1.0/(1.0 + math.exp(-alpha_R*(R - tau_R)))
+    else:  # "log" по умолчанию
+        # мягкая лог-нормализация: 0 -> 0, 100000 -> 1
+        R_norm = math.log(1 + R) / math.log(100000)
+
+    # ---------- Взвешивания ----------
+    I_w = (max(1, float(I))) ** beta
+    C_w = (max(0.0, min(1.0, float(C)))) ** gamma
+    E_w = (max(1, float(E))) ** delta
+    K_w = (max(1, float(K))) ** etha
+
+    # ---------- Сырая метрика ----------
     raw = (R_norm * I_w * C_w) / (E_w * K_w)
 
-    # ---- 3. Максимально возможное значение ----
-    R_max = 1
-    I_max = 5 ** beta
-    C_max = 1 ** gamma
-    E_min = 1 ** delta
-    K_min = 1 ** etha
+    # сохраним в историю для будущей автокалибровки
+    if USE_HISTORY:
+        _append_raw_history(raw)
 
-    raw_max = (R_max * I_max * C_max) / (E_min * K_min)
+    # ---------- Базовые теоретические границы raw ----------
+    # Берём разумные «крайние» случаи, чтобы не было нулей:
+    #   R_norm_min≈0 (R=0), I_min=1, C_min=0.1 (не 0, чтобы не обнулять),
+    #   E_max=10, K_max=10
+    raw_min_theory = (0.0 * (1 ** beta) * (0.1 ** gamma)) / ((10 ** delta) * (10 ** etha))
 
-    # ---- 4. Нормировка в диапазон 0..1 ----
-    norm = raw / raw_max
-    norm = max(0, min(1, norm))
+    #   R_norm_max=1 (R≈100000), I_max=5, C_max=1, E_min=1, K_min=1
+    raw_max_theory = (1.0 * (5 ** beta) * (1.0 ** gamma)) / ((1.0 ** delta) * (1.0 ** etha))
 
-    # ---- 5. Лёгкая S-функция: растягиваем низ + сглаживаем пик ----
-    score = norm ** 0.55      # ключевой параметр!
+    lo, hi = raw_min_theory, raw_max_theory
 
-    # ---- 6. Приводим к 1%..100% ----
-    score = 0.01 + score * 0.99
+    # ---------- Опциональная автокалибровка по истории ----------
+    if USE_HISTORY:
+        bounds = _get_history_bounds()
+        if bounds:
+            lo, hi = bounds
 
-    return f"{score * 100:.1f}%"
+    # защита от вырожденности
+    if hi <= lo:
+        hi = lo + 1e-9
+
+    # ---------- Жёсткая min-max нормировка к 1–100% ----------
+    t = (raw - lo) / (hi - lo)  # 0..1 (примерно)
+    t = max(0.01, min(1.0, t))  # клип
+    return round(t * 100, 2)
 
 # =============================
 # SAVE
