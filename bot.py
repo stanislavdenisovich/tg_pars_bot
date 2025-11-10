@@ -2,74 +2,90 @@ import os
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from openai import OpenAI
-import math
 import json
 from datetime import datetime
+import math
 
-# === Переменные окружения из Railway ===
+# =============================
+#  ENV VARIABLES
+# =============================
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
 if not TG_BOT_TOKEN:
-    raise RuntimeError("TG_BOT_TOKEN не найден. Добавь его в Railway → Variables")
+    raise RuntimeError("TG_BOT_TOKEN не найден в Railway → Variables")
 if not OPENAI_KEY:
-    raise RuntimeError("OPENAI_API_KEY не найден. Добавь его в Railway → Variables")
+    raise RuntimeError("OPENAI_API_KEY не найден в Railway → Variables")
 
 bot = telebot.TeleBot(TG_BOT_TOKEN, parse_mode="HTML")
 client = OpenAI(api_key=OPENAI_KEY)
 
-USER_STATE = {}
-ANSWERS = {}
-
-QUESTIONS = [
-    "1) В одном предложении опиши свою идею стартапа (что это и для кого):",
-    "2) Какую ключевую проблему вы решаете? Опиши максимально конкретно:",
-    "3) Кто именно ваша целевая аудитория? (возраст, профессия, страна, сегмент):",
-    "4) Насколько часто аудитория сталкивается с этой проблемой? (ежедневно, еженедельно, разово и т.д.):",
-    "5) Почему существующие решения недостаточно эффективны? В чём их недостатки:",
-    "6) Что делает твоё решение уникальным или более ценным по сравнению с другими:",
-    "7) Оцени приблизительный размер аудитории, которую может затронуть идея (число людей или компаний):",
-    "8) Насколько сильно эта проблема влияет на жизнь/бизнес аудитории? (0 — почти не влияет, 10 — критически):",
-    "9) Насколько сложно реализовать продукт? (функционал, интеграции, команда, ресурсы):",
-    "10) Есть ли сильные конкуренты? Если да, кто и чем они опасны:"
-]
+# =============================
+#  STATE
+# =============================
+STATE = {}        # user_id → {"mode": "ask_questions" | "collect", "questions": [...], "answers": []}
 
 # =============================
 # /start
 # =============================
 @bot.message_handler(commands=["start"])
 def start(msg):
-    user = msg.from_user.id
-    USER_STATE[user] = 0
-    ANSWERS[user] = []
-
-    bot.send_message(msg.chat.id,
-        "🔥 Приступаем к оценке твоей идеи.\n"
-        "Отвечай на следующие вопросы.\n\n"
-        + QUESTIONS[0]
+    bot.send_message(
+        msg.chat.id,
+        "🔥 Напиши свою идею стартапа в одном сообщении.\n"
+        "Я сам задам уточняющие вопросы, а потом оценю её по модели RICE+."
     )
 
-# =============================
-# Сбор ответов
-# =============================
-@bot.message_handler(func=lambda m: m.from_user.id in USER_STATE)
-def collect_answers(msg):
-    user = msg.from_user.id
-    step = USER_STATE[user]
+    STATE[msg.from_user.id] = {"mode": "wait_idea"}
 
-    ANSWERS[user].append(msg.text)
-    USER_STATE[user] += 1
 
-    if USER_STATE[user] < len(QUESTIONS):
-        bot.send_message(msg.chat.id, QUESTIONS[USER_STATE[user]])
-    else:
-        bot.send_message(msg.chat.id, "✅ Отлично. Иду считать оценку...")
-        process_idea(msg.chat.id, user)
+# =============================
+# Генерация вопросов GPT
+# =============================
+def generate_questions(idea_text: str):
+    prompt = f"""
+Ты — эксперт-аналитик стартапов.
+Пользователь дал идею:
+
+\"\"\"{idea_text}\"\"\"
+
+Сгенерируй 3–5 самых важных уточняющих вопросов,
+которые нужны для корректной оценки идеи по метрикам
+RICE (Reach, Impact, Confidence, Effort) + Competition.
+
+Формат ответа: ТОЛЬКО JSON, пример:
+
+{{
+  "questions": [
+    "Вопрос 1...",
+    "Вопрос 2...",
+    "Вопрос 3..."
+  ]
+}}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    raw = response.choices[0].message["content"]
+
+    # извлечение JSON
+    try:
+        return json.loads(raw)["questions"]
+    except:
+        import re
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if not m:
+            raise RuntimeError("Ошибка: GPT вернул не JSON:\n" + raw)
+        return json.loads(m.group(0))["questions"]
 
 # =============================
 # ChatGPT анализ
 # =============================
-def ask_chatgpt(answers):
+def ask_chatgpt(idea, q_list, a_list):
     """
     Возвращает словарь с числовыми полями:
     {
@@ -168,20 +184,12 @@ reach (R), impact (I), confidence (C), effort (E), competition (K).
 • Верни ТОЛЬКО JSON без текста.
 """
 
-    # --- полные данные пользователя (все 10 ответов) ---
     user_data = f"""
-Ответы пользователя:
+Идея:
+{idea}
 
-1) Краткое описание: {answers[0]}
-2) Проблема: {answers[1]}
-3) ЦА: {answers[2]}
-4) Частота проблемы: {answers[3]}
-5) Недостатки текущих решений: {answers[4]}
-6) Уникальность решения: {answers[5]}
-7) Размер аудитории: {answers[6]}
-8) Сила влияния (0–10): {answers[7]}
-9) Сложность реализации: {answers[8]}
-10) Конкуренты: {answers[9]}
+Вопросы и ответы:
+{json.dumps(list(zip(q_list, a_list)), ensure_ascii=False, indent=2)}
 
 Верни JSON строго такого вида:
 {{
@@ -252,29 +260,63 @@ def compute_score(R, I, C, E, K, alpha=0.9, beta=1.2, gamma=0.7, delta=1.8, etha
     return round((R_norm * I_w * C_w) / (E_w * K_w), 4)
 
 # =============================
-# Save to file
+#  Сохранение
 # =============================
-def save_result(user_id, answers, params, score):
+def save_result(user_id, idea, questions, answers, params, score):
     with open("results.txt", "a", encoding="utf-8") as f:
         f.write("\n============================\n")
         f.write(f"Дата: {datetime.now()}\n")
         f.write(f"User ID: {user_id}\n")
-        f.write("Описание идеи:\n")
-        for a in answers:
-            f.write(f" - {a}\n")
-        f.write("\nПараметры:\n")
-        for k, v in params.items():
-            f.write(f"{k}: {v}\n")
+        f.write(f"Идея: {idea}\n\n")
+        f.write("Вопросы и ответы:\n")
+        for q, a in zip(questions, answers):
+            f.write(f"- {q}\n  {a}\n")
+        f.write("\nОценка параметров:\n")
+        f.write(json.dumps(params, ensure_ascii=False, indent=2))
         f.write(f"\nScore: {score}\n")
         f.write("============================\n")
 
-# =============================
-# Process
-# =============================
-def process_idea(chat_id, user):
-    answers = ANSWERS[user]
 
-    params = ask_chatgpt(answers)
+# =============================
+#  Основная логика сообщений
+# =============================
+@bot.message_handler(func=lambda m: True)
+def all_messages(msg):
+    user = msg.from_user.id
+
+    # --- Шаг 1 — ждем идею ---
+    if user not in STATE or STATE[user]["mode"] == "wait_idea":
+        idea = msg.text
+        bot.send_message(msg.chat.id, "✅ Получил идею. Генерирую уточняющие вопросы...")
+
+        questions = generate_questions(idea)
+
+        STATE[user] = {
+            "mode": "collect",
+            "idea": idea,
+            "questions": questions,
+            "answers": [],
+            "index": 0
+        }
+
+        bot.send_message(msg.chat.id, f"❓ {questions[0]}")
+        return
+
+    # --- Шаг 2 — собираем ответы ---
+    st = STATE[user]
+
+    st["answers"].append(msg.text)
+    st["index"] += 1
+
+    if st["index"] < len(st["questions"]):
+        bot.send_message(msg.chat.id, f"❓ {st['questions'][st['index']]}")
+        return
+
+    # --- Шаг 3 — все ответы получены ---
+    bot.send_message(msg.chat.id, "✅ Супер! Оцениваю идею...")
+
+    params = evaluate_rice(st["idea"], st["questions"], st["answers"])
+
     score = compute_score(
         R=params["reach"],
         I=params["impact"],
@@ -283,19 +325,20 @@ def process_idea(chat_id, user):
         K=params["competition"]
     )
 
-    save_result(user, answers, params, score)
+    save_result(user, st["idea"], st["questions"], st["answers"], params, score)
 
-    bot.send_message(chat_id,
-        f"✅ Готово!\n\n"
-        f"<b>Оценка идеи: {score}</b>\n\n"
+    bot.send_message(
+        msg.chat.id,
+        f"🔥 Готово!\n\n"
+        f"<b>Итоговая оценка: {score}</b>\n\n"
         f"<pre>{json.dumps(params, indent=2, ensure_ascii=False)}</pre>"
     )
 
-    del USER_STATE[user]
-    del ANSWERS[user]
+    del STATE[user]
+
 
 # =============================
-# RUN
+#  RUN
 # =============================
 print("Bot started.")
 bot.infinity_polling()
