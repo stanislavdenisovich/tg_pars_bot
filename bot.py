@@ -18,7 +18,32 @@ from datetime import datetime
 from dotenv import load_dotenv
 import telebot
 from openai import OpenAI
+import hashlib
 
+CACHE_FILE = "idea_cache.json"
+
+def _idea_key(text: str):
+    """Создаёт уникальный хэш-ключ для идеи (без учёта регистра и пробелов)."""
+    return hashlib.md5(text.strip().lower().encode()).hexdigest()
+
+def cache_get(idea: str):
+    if not os.path.exists(CACHE_FILE):
+        return None
+    try:
+        data = json.load(open(CACHE_FILE, "r", encoding="utf-8"))
+        return data.get(_idea_key(idea))
+    except Exception:
+        return None
+
+def cache_set(idea: str, result: dict):
+    try:
+        data = {}
+        if os.path.exists(CACHE_FILE):
+            data = json.load(open(CACHE_FILE, "r", encoding="utf-8"))
+        data[_idea_key(idea)] = result
+        json.dump(data, open(CACHE_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    except Exception as e:
+        print("Ошибка при записи кеша:", e)
 # ---------------------------
 # Конфигурация / окружение
 # ---------------------------
@@ -250,12 +275,13 @@ def ask_chatgpt(idea_text, retries=2, backoff=5):
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.1,
+                seed=42,  # ✅ фиксирует генерацию
                 messages=[
                     {"role": "system", "content": rules},
                     {"role": "user", "content": user_data}
                 ],
                 max_tokens=300
-            )
+)
             raw = response.choices[0].message.content
             try:
                 data = safe_json_load(raw)
@@ -356,7 +382,14 @@ def handle_idea(msg):
     user = msg.from_user.id
     idea = msg.text.strip()
 
-    # 1️⃣ Проверяем, что пользователь написал хотя бы 10 символов и не набор случайных символов
+    # Проверка кеша
+    cached = cache_get(idea)
+    if cached:
+        bot.send_message(msg.chat.id, cached["text"])
+        print(f"✅ Отправлен кешированный результат для идеи: {idea[:40]}...")
+        return
+
+    # 1️⃣ Проверяем вход
     if len(idea) < 10 or idea.isdigit() or not any(c.isalpha() for c in idea):
         bot.send_message(
             msg.chat.id,
@@ -385,15 +418,19 @@ def handle_idea(msg):
         # 4️⃣ Получаем советы от ChatGPT
         advice = generate_advice(idea, params)
 
-        # 5️⃣ Отправляем результат пользователю
+# 5️⃣ Отправляем результат пользователю
         result_text = f"""
-<b>🔍 Анализ твоей идеи</b>
+        <b>🔍 Анализ твоей идеи</b>
 
-<b>✅ Итоговая оценка: {score}</b>
+        <b>✅ Итоговая оценка: {score}</b>
 
-<b>💡 Экспертный разбор:</b>
-{advice}
-"""
+        <b>💡 Экспертный разбор:</b>
+        {advice}
+        """
+
+        # ✅ Сохраняем результат в кеш
+        cache_set(idea, {"text": result_text, "score": score, "params": params})
+
         bot.send_message(msg.chat.id, result_text)
 
     except Exception as e:
